@@ -22,12 +22,21 @@ export const auth = betterAuth({
   emailAndPassword: {
     enabled: true,
   },
+  // InstantDB only accepts UUIDs as entity ids. Some plugin code paths (e.g.
+  // the org plugin's createInvitation) pre-generate ids via context.generateId,
+  // which otherwise emits non-UUID nanoids that InstantDB rejects. Forcing UUIDs
+  // here makes every generated id InstantDB-compatible.
+  advanced: {
+    database: {
+      generateId: "uuid",
+    },
+  },
   plugins: [
     organization({
       // Delivery hook for member invitations. Better Auth assembles the data
       // and decides when to send; we hand it to Postmark (see lib/email.ts).
       async sendInvitationEmail(data) {
-        const inviteLink = `${process.env.BETTER_AUTH_URL}/accept-invitation/${data.id}`;
+        const inviteLink = `${process.env.BETTER_AUTH_URL}/accept-invitation/${data.id}?email=${encodeURIComponent(data.email)}`;
         await sendOrganizationInvitation({
           email: data.email,
           invitedByUsername: data.inviter.user.name,

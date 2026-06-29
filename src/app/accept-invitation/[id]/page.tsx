@@ -1,138 +1,212 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { Suspense, useEffect, useRef, useState } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { db } from "@/lib/db";
 import { authClient } from "@/lib/auth-client";
 
-// Standalone screen the invitee lands on from the invite link. They must be
-// signed in with the invited email; Better Auth enforces that on accept.
+// Invite landing page. If the visitor isn't signed in, we show an inline
+// sign-up form (pre-filled and locked to the invited email) so there's no
+// detour. The moment they're authenticated we auto-accept the invitation and
+// drop them into the organization.
 export default function AcceptInvitationPage() {
+  return (
+    <Suspense fallback={<Shell>Loading…</Shell>}>
+      <AcceptInvitation />
+    </Suspense>
+  );
+}
+
+function AcceptInvitation() {
   const params = useParams<{ id: string }>();
+  const searchParams = useSearchParams();
   const router = useRouter();
   const invitationId = params.id;
+  const invitedEmail = searchParams.get("email") ?? "";
 
   const { isLoading: authLoading, user } = db.useAuth();
 
-  const [invite, setInvite] = useState<{
-    organizationName: string;
-    email: string;
-  } | null>(null);
   const [status, setStatus] = useState<
-    "loading" | "ready" | "working" | "error" | "done"
-  >("loading");
+    "idle" | "accepting" | "error" | "done"
+  >("idle");
   const [message, setMessage] = useState<string | null>(null);
+  const acceptedRef = useRef(false);
 
-  // Load the invitation details once we know who's logged in.
+  // Once signed in, accept the invitation automatically and head to the app.
   useEffect(() => {
-    if (authLoading) return;
-    if (!user) {
-      setStatus("error");
-      setMessage("Please sign in with the invited email to accept.");
-      return;
-    }
-    let cancelled = false;
+    if (authLoading || !user) return;
+    if (acceptedRef.current) return;
+    acceptedRef.current = true;
+
     (async () => {
-      const { data, error } = await authClient.organization.getInvitation({
-        query: { id: invitationId },
-      });
-      if (cancelled) return;
-      if (error || !data) {
+      setStatus("accepting");
+
+      // Look up the invitation so we can validate the email and set the
+      // active org after joining.
+      const { data: invite, error: getErr } =
+        await authClient.organization.getInvitation({
+          query: { id: invitationId },
+        });
+      if (getErr || !invite) {
         setStatus("error");
-        setMessage(error?.message ?? "Invitation not found or expired.");
+        setMessage(getErr?.message ?? "Invitation not found or expired.");
         return;
       }
-      setInvite({
-        organizationName: data.organizationName,
-        email: data.email,
-      });
-      setStatus("ready");
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [authLoading, user, invitationId]);
+      if (user.email !== invite.email) {
+        setStatus("error");
+        setMessage(
+          `This invitation was sent to ${invite.email}, but you're signed in as ${user.email}. Sign out and sign in with the invited email.`,
+        );
+        return;
+      }
 
-  async function accept() {
-    setStatus("working");
-    const { error } = await authClient.organization.acceptInvitation({
-      invitationId,
-    });
-    if (error) {
-      setStatus("error");
-      setMessage(error.message ?? "Could not accept invitation.");
-      return;
-    }
-    setStatus("done");
-    setTimeout(() => router.push("/"), 800);
+      const { error: acceptErr } =
+        await authClient.organization.acceptInvitation({ invitationId });
+      if (acceptErr) {
+        setStatus("error");
+        setMessage(acceptErr.message ?? "Could not accept the invitation.");
+        return;
+      }
+
+      await authClient.organization.setActive({
+        organizationId: invite.organizationId,
+      });
+      setStatus("done");
+      router.push("/");
+    })();
+  }, [authLoading, user, invitationId, router]);
+
+  if (authLoading) return <Shell>Loading…</Shell>;
+
+  // Signed out → inline auth (defaults to sign-up for new invitees).
+  if (!user) {
+    return (
+      <Shell>
+        <InviteAuthForm invitedEmail={invitedEmail} />
+      </Shell>
+    );
   }
 
-  async function reject() {
-    setStatus("working");
-    const { error } = await authClient.organization.rejectInvitation({
-      invitationId,
-    });
+  // Signed in → accepting / done / error states.
+  return (
+    <Shell>
+      {status === "error" ? (
+        <div className="flex flex-col space-y-4">
+          <p className="text-sm text-red-500">{message}</p>
+          <button
+            onClick={() => authClient.signOut()}
+            className="border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50"
+          >
+            Sign out
+          </button>
+          <a
+            href="/"
+            className="text-xs text-gray-400 underline hover:text-gray-600"
+          >
+            Back to app
+          </a>
+        </div>
+      ) : (
+        <p className="text-sm text-gray-500">Joining organization…</p>
+      )}
+    </Shell>
+  );
+}
+
+// Sign up (or sign in) right on the invite page. Email is locked to the
+// invited address so the accepted session always matches the invitation.
+function InviteAuthForm({ invitedEmail }: { invitedEmail: string }) {
+  const [mode, setMode] = useState<"signup" | "signin">("signup");
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const field = (n: string) =>
+      form.elements.namedItem(n) as HTMLInputElement;
+    const email = field("email").value.trim();
+    const password = field("password").value;
+    const name = mode === "signup" ? field("name").value.trim() : undefined;
+    setError(null);
+    setSubmitting(true);
+    const { error } =
+      mode === "signup"
+        ? await authClient.signUp.email({ email, password, name: name! })
+        : await authClient.signIn.email({ email, password });
+    setSubmitting(false);
+    // On success, db.useAuth() flips to signed-in and the parent auto-accepts.
     if (error) {
-      setStatus("error");
-      setMessage(error.message ?? "Could not reject invitation.");
-      return;
+      setError(error.message ?? "Something went wrong. Try again.");
     }
-    router.push("/");
   }
 
   return (
+    <div className="flex flex-col space-y-4">
+      <p className="text-sm text-gray-500">
+        {mode === "signup"
+          ? "Create your account to join the organization."
+          : "Sign in to join the organization."}
+      </p>
+      <form onSubmit={handleSubmit} className="flex flex-col space-y-4">
+        {mode === "signup" && (
+          <input
+            name="name"
+            type="text"
+            required
+            placeholder="Name"
+            className="border border-gray-300 px-3 py-2 text-sm outline-none focus:border-gray-500"
+          />
+        )}
+        <input
+          name="email"
+          type="email"
+          autoComplete="email"
+          required
+          defaultValue={invitedEmail}
+          readOnly={!!invitedEmail}
+          placeholder="you@example.com"
+          className="border border-gray-300 px-3 py-2 text-sm outline-none focus:border-gray-500 read-only:bg-gray-50 read-only:text-gray-500"
+        />
+        <input
+          name="password"
+          type="password"
+          autoComplete={mode === "signup" ? "new-password" : "current-password"}
+          required
+          minLength={8}
+          placeholder="Password"
+          className="border border-gray-300 px-3 py-2 text-sm outline-none focus:border-gray-500"
+        />
+        <button
+          type="submit"
+          disabled={submitting}
+          className="border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50 transition-colors disabled:opacity-50"
+        >
+          {submitting ? "…" : mode === "signup" ? "Sign up & join" : "Sign in & join"}
+        </button>
+        {error && <p className="text-xs text-red-500">{error}</p>}
+      </form>
+      <button
+        type="button"
+        onClick={() => {
+          setMode(mode === "signup" ? "signin" : "signup");
+          setError(null);
+        }}
+        className="text-xs text-gray-400 hover:text-gray-600 underline"
+      >
+        {mode === "signup"
+          ? "Already have an account? Sign in"
+          : "Need an account? Sign up"}
+      </button>
+    </div>
+  );
+}
+
+function Shell({ children }: { children: React.ReactNode }) {
+  return (
     <div className="font-mono min-h-screen flex justify-center items-center flex-col space-y-6">
       <h2 className="tracking-wide text-5xl text-gray-300">invite</h2>
-      <div className="border border-gray-300 max-w-xs w-full p-6 flex flex-col space-y-4">
-        {status === "loading" && (
-          <p className="text-sm text-gray-400">Loading invitation…</p>
-        )}
-
-        {status === "error" && (
-          <>
-            <p className="text-sm text-red-500">{message}</p>
-            <a href="/" className="text-xs text-gray-400 underline hover:text-gray-600">
-              Back to app
-            </a>
-          </>
-        )}
-
-        {status === "done" && (
-          <p className="text-sm text-gray-600">Joined! Redirecting…</p>
-        )}
-
-        {(status === "ready" || status === "working") && invite && (
-          <>
-            <p className="text-sm text-gray-500">
-              You&apos;ve been invited to join{" "}
-              <span className="text-gray-800">{invite.organizationName}</span>.
-            </p>
-            {user?.email !== invite.email && (
-              <p className="text-xs text-amber-600">
-                This invite is for {invite.email}, but you&apos;re signed in as{" "}
-                {user?.email}. Accepting may fail — sign in with the invited
-                email.
-              </p>
-            )}
-            <div className="flex gap-2">
-              <button
-                onClick={accept}
-                disabled={status === "working"}
-                className="flex-1 border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50 transition-colors disabled:opacity-50"
-              >
-                {status === "working" ? "…" : "Accept"}
-              </button>
-              <button
-                onClick={reject}
-                disabled={status === "working"}
-                className="border border-gray-300 px-3 py-2 text-sm text-gray-400 hover:text-gray-600 disabled:opacity-50"
-              >
-                Decline
-              </button>
-            </div>
-          </>
-        )}
-      </div>
+      <div className="border border-gray-300 max-w-xs w-full p-6">{children}</div>
     </div>
   );
 }

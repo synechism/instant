@@ -1,0 +1,16 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - heading "invite" [level=2] [ref=e3]
+    - generic [ref=e5]:
+      - paragraph [ref=e6]: Create your account to join the organization.
+      - generic [ref=e7]:
+        - textbox "Name" [ref=e8]
+        - textbox "you@example.com" [ref=e9]: prefill-test@example.com
+        - textbox "Password" [ref=e10]
+        - button "Sign up & join" [ref=e11]
+      - button "Already have an account? Sign in" [ref=e12]
+  - button "Open Next.js Dev Tools" [ref=e18] [cursor=pointer]:
+    - img [ref=e19]
+  - button [ref=e22] [cursor=pointer]:
+    - img [ref=e23]
+  - alert [ref=e26]
