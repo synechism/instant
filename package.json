@@ -11,7 +11,10 @@
   "dependencies": {
     "@instantdb/admin": "latest",
     "@instantdb/react": "latest",
+    "better-auth": "^1.6.22",
+    "better-auth-instantdb": "^1.3.0",
     "next": "latest",
+    "postmark": "^4.0.7",
     "react": "19.1.0",
     "react-dom": "19.1.0"
   },
